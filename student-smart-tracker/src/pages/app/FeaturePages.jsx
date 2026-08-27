@@ -18,11 +18,18 @@ import {
 
 import { useEffect, useState, useRef } from 'react'
 import { supabase } from '@/lib/supabaseClient'
+function addInterval(dateStr, frequency) {
+  const d = new Date(dateStr)
+  if (frequency === 'weekly') d.setDate(d.getDate() + 7)
+  else if (frequency === 'yearly') d.setFullYear(d.getFullYear() + 1)
+  else d.setMonth(d.getMonth() + 1)
+  return d.toISOString().split('T')[0]
+}
+
 export function ExpensesPage() {
   const [expenses, setExpenses] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-
   const [showForm, setShowForm] = useState(false)
 
   const [form, setForm] = useState({
@@ -32,6 +39,8 @@ export function ExpensesPage() {
     description: '',
     paymentMethod: 'upi',
     merchant: '',
+    isRecurring: false,
+    frequency: 'monthly',
   })
 
   async function loadExpenses() {
@@ -69,11 +78,10 @@ export function ExpensesPage() {
   }, [])
 
   function handleChange(event) {
-    const { name, value } = event.target
-
+    const { name, value, type, checked } = event.target
     setForm((previous) => ({
       ...previous,
-      [name]: value,
+      [name]: type === 'checkbox' ? checked : value,
     }))
   }
 
@@ -111,6 +119,22 @@ export function ExpensesPage() {
       return
     }
 
+    if (form.isRecurring) {
+      const { error: recurringError } = await supabase.from('recurring_expenses').insert({
+        user_id: user.id,
+        name: form.description || form.merchant || CATEGORY_MAP[form.category]?.label || 'Recurring expense',
+        amount: Number(form.amount),
+        category: form.category,
+        frequency: form.frequency,
+        next_due_date: addInterval(form.date, form.frequency),
+      })
+
+      if (recurringError) {
+        console.error(recurringError)
+        setError(`Expense saved, but recurring setup failed: ${recurringError.message}`)
+      }
+    }
+
     setForm({
       amount: '',
       category: 'food',
@@ -118,6 +142,8 @@ export function ExpensesPage() {
       description: '',
       paymentMethod: 'upi',
       merchant: '',
+      isRecurring: false,
+      frequency: 'monthly',
     })
 
     setShowForm(false)
@@ -125,10 +151,7 @@ export function ExpensesPage() {
   }
 
   async function deleteExpense(id) {
-    const { error } = await supabase
-      .from('expenses')
-      .delete()
-      .eq('id', id)
+    const { error } = await supabase.from('expenses').delete().eq('id', id)
 
     if (error) {
       console.error(error)
@@ -136,22 +159,15 @@ export function ExpensesPage() {
       return
     }
 
-    setExpenses((previous) =>
-      previous.filter((expense) => expense.id !== id),
-    )
+    setExpenses((previous) => previous.filter((expense) => expense.id !== id))
   }
 
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="font-display text-2xl font-semibold text-white">
-            Expenses
-          </h1>
-
-          <p className="mt-1 text-sm text-slate-400">
-            Track your real expenses stored securely in your account.
-          </p>
+          <h1 className="font-display text-2xl font-semibold text-white">Expenses</h1>
+          <p className="mt-1 text-sm text-slate-400">Track your real expenses stored securely in your account.</p>
         </div>
 
         <button
@@ -163,9 +179,7 @@ export function ExpensesPage() {
       </div>
 
       {error && (
-        <div className="rounded-xl border border-red-400/30 bg-red-400/10 p-4 text-sm text-red-300">
-          {error}
-        </div>
+        <div className="rounded-xl border border-red-400/30 bg-red-400/10 p-4 text-sm text-red-300">{error}</div>
       )}
 
       {showForm && (
@@ -175,15 +189,9 @@ export function ExpensesPage() {
           </CardHeader>
 
           <CardBody>
-            <form
-              onSubmit={handleSubmit}
-              className="grid gap-4 sm:grid-cols-2"
-            >
+            <form onSubmit={handleSubmit} className="grid gap-4 sm:grid-cols-2">
               <div>
-                <label className="text-sm text-slate-400">
-                  Amount
-                </label>
-
+                <label className="text-sm text-slate-400">Amount</label>
                 <input
                   name="amount"
                   type="number"
@@ -198,10 +206,7 @@ export function ExpensesPage() {
               </div>
 
               <div>
-                <label className="text-sm text-slate-400">
-                  Category
-                </label>
-
+                <label className="text-sm text-slate-400">Category</label>
                 <select
                   name="category"
                   value={form.category}
@@ -212,22 +217,48 @@ export function ExpensesPage() {
                   <option value="travel">Travel</option>
                   <option value="rent">Rent</option>
                   <option value="shopping">Shopping</option>
-                  <option value="subscriptions">
-                    Subscriptions
-                  </option>
-                  <option value="entertainment">
-                    Entertainment
-                  </option>
+                  <option value="subscriptions">Subscriptions</option>
+                  <option value="entertainment">Entertainment</option>
                   <option value="books">Books</option>
                   <option value="other">Other</option>
                 </select>
               </div>
 
-              <div>
-                <label className="text-sm text-slate-400">
-                  Date
+              <div className="sm:col-span-2 rounded-xl border border-white/8 bg-white/4 p-3">
+                <label className="flex items-center gap-2 text-sm text-slate-200">
+                  <input
+                    type="checkbox"
+                    name="isRecurring"
+                    checked={form.isRecurring}
+                    onChange={handleChange}
+                    className="size-4 rounded border-white/20 bg-white/5"
+                  />
+                  Make this a recurring expense
                 </label>
+                <p className="mt-1 text-xs text-slate-500">
+                  Use this for things like rent, Wi-Fi, or subscriptions that repeat every period. It'll show up
+                  on the Recurring page and be counted in your remaining budget automatically.
+                </p>
 
+                {form.isRecurring && (
+                  <div className="mt-3">
+                    <label className="text-xs text-slate-400">Repeats</label>
+                    <select
+                      name="frequency"
+                      value={form.frequency}
+                      onChange={handleChange}
+                      className="mt-1 w-full rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-sm text-white outline-none sm:w-48"
+                    >
+                      <option value="weekly">Weekly</option>
+                      <option value="monthly">Monthly</option>
+                      <option value="yearly">Yearly</option>
+                    </select>
+                  </div>
+                )}
+              </div>
+
+              <div>
+                <label className="text-sm text-slate-400">Date</label>
                 <input
                   name="date"
                   type="date"
@@ -239,10 +270,7 @@ export function ExpensesPage() {
               </div>
 
               <div>
-                <label className="text-sm text-slate-400">
-                  Payment method
-                </label>
-
+                <label className="text-sm text-slate-400">Payment method</label>
                 <select
                   name="paymentMethod"
                   value={form.paymentMethod}
@@ -256,10 +284,7 @@ export function ExpensesPage() {
               </div>
 
               <div>
-                <label className="text-sm text-slate-400">
-                  Description
-                </label>
-
+                <label className="text-sm text-slate-400">Description</label>
                 <input
                   name="description"
                   value={form.description}
@@ -270,10 +295,7 @@ export function ExpensesPage() {
               </div>
 
               <div>
-                <label className="text-sm text-slate-400">
-                  Merchant
-                </label>
-
+                <label className="text-sm text-slate-400">Merchant</label>
                 <input
                   name="merchant"
                   value={form.merchant}
@@ -303,43 +325,23 @@ export function ExpensesPage() {
 
         <CardBody className="divide-y divide-white/8 p-0">
           {loading ? (
-            <div className="px-5 py-6 text-sm text-slate-400">
-              Loading expenses...
-            </div>
+            <div className="px-5 py-6 text-sm text-slate-400">Loading expenses...</div>
           ) : expenses.length === 0 ? (
-            <div className="px-5 py-6 text-sm text-slate-400">
-              No expenses yet. Add your first expense above.
-            </div>
+            <div className="px-5 py-6 text-sm text-slate-400">No expenses yet. Add your first expense above.</div>
           ) : (
             expenses.map((expense) => (
-              <div
-                key={expense.id}
-                className="flex items-center justify-between gap-3 px-5 py-4 text-sm"
-              >
+              <div key={expense.id} className="flex items-center justify-between gap-3 px-5 py-4 text-sm">
                 <div>
-                  <p className="text-white">
-                    {expense.description || 'Expense'}
-                  </p>
-
+                  <p className="text-white">{expense.description || 'Expense'}</p>
                   <p className="text-xs text-slate-400">
-                    {CATEGORY_MAP[expense.category]?.label ||
-                      expense.category}{' '}
-                    · {formatDate(expense.expense_date)}
-                    {expense.payment_method || '—'}
+                    {CATEGORY_MAP[expense.category]?.label || expense.category} ·{' '}
+                    {formatDate(expense.expense_date)} · {expense.payment_method || '—'}
                   </p>
-
-                  {expense.merchant && (
-                    <p className="mt-1 text-xs text-slate-500">
-                      {expense.merchant}
-                    </p>
-                  )}
+                  {expense.merchant && <p className="mt-1 text-xs text-slate-500">{expense.merchant}</p>}
                 </div>
 
                 <div className="flex items-center gap-3">
-                  <p className="font-medium text-white">
-                    {formatINR(expense.amount)}
-                  </p>
-
+                  <p className="font-medium text-white">{formatINR(expense.amount)}</p>
                   <button
                     onClick={() => deleteExpense(expense.id)}
                     className="text-xs text-red-300 hover:text-red-200"
@@ -355,7 +357,6 @@ export function ExpensesPage() {
     </div>
   )
 }
-
 export function BudgetPage() {
   const [amount, setAmount] = useState('')
   const [currentBudget, setCurrentBudget] = useState(null)
