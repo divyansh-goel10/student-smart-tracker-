@@ -126,7 +126,8 @@ export function ExpensesPage() {
         amount: Number(form.amount),
         category: form.category,
         frequency: form.frequency,
-        next_due_date: addInterval(form.date, form.frequency),
+        due_date: addInterval(form.date, form.frequency),
+        active: true,
       })
 
       if (recurringError) {
