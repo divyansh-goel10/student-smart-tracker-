@@ -14,21 +14,34 @@ import {
   Upload,
   X,
   CheckCircle2,
+  Pencil,
 } from 'lucide-react'
 
 import { useEffect, useState, useRef } from 'react'
 import { supabase } from '@/lib/supabaseClient'
 function addInterval(dateStr, frequency) {
-  const d = new Date(dateStr)
-  if (frequency === 'weekly') d.setDate(d.getDate() + 7)
-  else if (frequency === 'yearly') d.setFullYear(d.getFullYear() + 1)
-  else d.setMonth(d.getMonth() + 1)
-  return d.toISOString().split('T')[0]
+  if (!dateStr) return ''
+
+  // Parse as a local calendar date so the displayed date does not
+  // shift because of timezone conversion.
+  const [year, month, day] = dateStr.split('-').map(Number)
+  const d = new Date(year, month - 1, day)
+
+  if (frequency === 'weekly') {
+    d.setDate(d.getDate() + 7)
+  } else if (frequency === 'yearly') {
+    d.setFullYear(d.getFullYear() + 1)
+  } else {
+    d.setMonth(d.getMonth() + 1)
+  }
+
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`
 }
 
 export function ExpensesPage() {
   const [expenses, setExpenses] = useState([])
   const [loading, setLoading] = useState(true)
+  const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [showForm, setShowForm] = useState(false)
 
@@ -88,6 +101,7 @@ export function ExpensesPage() {
   async function handleSubmit(event) {
     event.preventDefault()
     setError('')
+    setSaving(true)
 
     const {
       data: { user },
@@ -95,15 +109,26 @@ export function ExpensesPage() {
 
     if (!user) {
       setError('Please log in first.')
+      setSaving(false)
       return
     }
 
     if (!form.amount || Number(form.amount) <= 0) {
       setError('Please enter a valid amount.')
+      setSaving(false)
       return
     }
 
-    const { error } = await supabase.from('expenses').insert({
+    if (!form.date) {
+      setError('Please select an expense date.')
+      setSaving(false)
+      return
+    }
+
+    // IMPORTANT:
+    // Always create the real expense first. This is what makes the
+    // current month's spending/budget calculations include it.
+    const { error: expenseError } = await supabase.from('expenses').insert({
       user_id: user.id,
       amount: Number(form.amount),
       category: form.category,
@@ -113,26 +138,43 @@ export function ExpensesPage() {
       merchant: form.merchant,
     })
 
-    if (error) {
-      console.error(error)
-      setError(error.message)
+    if (expenseError) {
+      console.error('Expense creation error:', expenseError)
+      setError(expenseError.message)
+      setSaving(false)
       return
     }
 
+    // If the checkbox is selected, create ONLY the recurring rule in
+    // addition to the actual expense above. The first expense is already
+    // counted in the budget because it lives in the expenses table.
     if (form.isRecurring) {
-      const { error: recurringError } = await supabase.from('recurring_expenses').insert({
-        user_id: user.id,
-        name: form.description || form.merchant || CATEGORY_MAP[form.category]?.label || 'Recurring expense',
-        amount: Number(form.amount),
-        category: form.category,
-        frequency: form.frequency,
-        due_date: addInterval(form.date, form.frequency),
-        active: true,
-      })
+      const nextDueDate = addInterval(form.date, form.frequency)
+
+      const { error: recurringError } = await supabase
+        .from('recurring_expenses')
+        .insert({
+          user_id: user.id,
+          name:
+            form.description ||
+            form.merchant ||
+            CATEGORY_MAP[form.category]?.label ||
+            'Recurring expense',
+          amount: Number(form.amount),
+          category: form.category,
+          frequency: form.frequency,
+          due_date: nextDueDate,
+          active: true,
+        })
 
       if (recurringError) {
-        console.error(recurringError)
-        setError(`Expense saved, but recurring setup failed: ${recurringError.message}`)
+        console.error('Recurring creation error:', recurringError)
+        setError(
+          `Expense saved, but recurring setup failed: ${recurringError.message}`,
+        )
+        setSaving(false)
+        await loadExpenses()
+        return
       }
     }
 
@@ -148,11 +190,17 @@ export function ExpensesPage() {
     })
 
     setShowForm(false)
-    loadExpenses()
+    setSaving(false)
+    await loadExpenses()
   }
 
   async function deleteExpense(id) {
-    const { error } = await supabase.from('expenses').delete().eq('id', id)
+    setError('')
+
+    const { error } = await supabase
+      .from('expenses')
+      .delete()
+      .eq('id', id)
 
     if (error) {
       console.error(error)
@@ -160,15 +208,25 @@ export function ExpensesPage() {
       return
     }
 
-    setExpenses((previous) => previous.filter((expense) => expense.id !== id))
+    setExpenses((previous) =>
+      previous.filter((expense) => expense.id !== id),
+    )
   }
+
+  const nextDueDate = form.isRecurring
+    ? addInterval(form.date, form.frequency)
+    : ''
 
   return (
     <div className="space-y-6">
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
-          <h1 className="font-display text-2xl font-semibold text-white">Expenses</h1>
-          <p className="mt-1 text-sm text-slate-400">Track your real expenses stored securely in your account.</p>
+          <h1 className="font-display text-2xl font-semibold text-white">
+            Expenses
+          </h1>
+          <p className="mt-1 text-sm text-slate-400">
+            Track your real expenses stored securely in your account.
+          </p>
         </div>
 
         <button
@@ -180,7 +238,9 @@ export function ExpensesPage() {
       </div>
 
       {error && (
-        <div className="rounded-xl border border-red-400/30 bg-red-400/10 p-4 text-sm text-red-300">{error}</div>
+        <div className="rounded-xl border border-red-400/30 bg-red-400/10 p-4 text-sm text-red-300">
+          {error}
+        </div>
       )}
 
       {showForm && (
@@ -226,7 +286,7 @@ export function ExpensesPage() {
               </div>
 
               <div className="sm:col-span-2 rounded-xl border border-white/8 bg-white/4 p-3">
-                <label className="flex items-center gap-2 text-sm text-slate-200">
+                <label className="flex cursor-pointer items-center gap-3 text-sm text-slate-200">
                   <input
                     type="checkbox"
                     name="isRecurring"
@@ -234,26 +294,38 @@ export function ExpensesPage() {
                     onChange={handleChange}
                     className="size-4 rounded border-white/20 bg-white/5"
                   />
-                  Make this a recurring expense
+                  <span className="font-medium">Make this a recurring expense</span>
                 </label>
-                <p className="mt-1 text-xs text-slate-500">
-                  Use this for things like rent, Wi-Fi, or subscriptions that repeat every period. It'll show up
-                  on the Recurring page and be counted in your remaining budget automatically.
+
+                <p className="mt-1 ml-7 text-xs text-slate-500">
+                  The expense is added now and counts toward this month's budget.
+                  The recurring rule is used for future due dates.
                 </p>
 
                 {form.isRecurring && (
-                  <div className="mt-3">
-                    <label className="text-xs text-slate-400">Repeats</label>
-                    <select
-                      name="frequency"
-                      value={form.frequency}
-                      onChange={handleChange}
-                      className="mt-1 w-full rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-sm text-white outline-none sm:w-48"
-                    >
-                      <option value="weekly">Weekly</option>
-                      <option value="monthly">Monthly</option>
-                      <option value="yearly">Yearly</option>
-                    </select>
+                  <div className="mt-4 ml-7 rounded-xl border border-emerald-400/20 bg-emerald-400/5 p-3">
+                    <div className="flex flex-wrap items-end gap-4">
+                      <div>
+                        <label className="text-xs text-slate-400">Repeats</label>
+                        <select
+                          name="frequency"
+                          value={form.frequency}
+                          onChange={handleChange}
+                          className="mt-1 w-full rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-sm text-white outline-none sm:w-48"
+                        >
+                          <option value="weekly">Weekly</option>
+                          <option value="monthly">Monthly</option>
+                          <option value="yearly">Yearly</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <p className="text-xs text-slate-400">Next due date</p>
+                        <p className="mt-1 text-sm font-semibold text-emerald-300">
+                          {nextDueDate ? formatDate(nextDueDate, 'd MMM yyyy') : 'Select a date'}
+                        </p>
+                      </div>
+                    </div>
                   </div>
                 )}
               </div>
@@ -309,9 +381,11 @@ export function ExpensesPage() {
               <div className="sm:col-span-2">
                 <button
                   type="submit"
-                  className="rounded-xl bg-emerald-400 px-5 py-2 font-semibold text-slate-950 transition hover:bg-emerald-300"
+                  disabled={saving}
+                  className="flex w-full items-center justify-center gap-2 rounded-xl bg-emerald-400 px-5 py-3 font-semibold text-slate-950 transition hover:bg-emerald-300 disabled:cursor-not-allowed disabled:opacity-50"
                 >
-                  Save Expense
+                  <CheckCircle2 className="size-5" />
+                  {saving ? 'Saving...' : 'Save Expense'}
                 </button>
               </div>
             </form>
@@ -328,17 +402,24 @@ export function ExpensesPage() {
           {loading ? (
             <div className="px-5 py-6 text-sm text-slate-400">Loading expenses...</div>
           ) : expenses.length === 0 ? (
-            <div className="px-5 py-6 text-sm text-slate-400">No expenses yet. Add your first expense above.</div>
+            <div className="px-5 py-6 text-sm text-slate-400">
+              No expenses yet. Add your first expense above.
+            </div>
           ) : (
             expenses.map((expense) => (
-              <div key={expense.id} className="flex items-center justify-between gap-3 px-5 py-4 text-sm">
+              <div
+                key={expense.id}
+                className="flex items-center justify-between gap-3 px-5 py-4 text-sm"
+              >
                 <div>
                   <p className="text-white">{expense.description || 'Expense'}</p>
                   <p className="text-xs text-slate-400">
                     {CATEGORY_MAP[expense.category]?.label || expense.category} ·{' '}
                     {formatDate(expense.expense_date)} · {expense.payment_method || '—'}
                   </p>
-                  {expense.merchant && <p className="mt-1 text-xs text-slate-500">{expense.merchant}</p>}
+                  {expense.merchant && (
+                    <p className="mt-1 text-xs text-slate-500">{expense.merchant}</p>
+                  )}
                 </div>
 
                 <div className="flex items-center gap-3">
@@ -358,6 +439,7 @@ export function ExpensesPage() {
     </div>
   )
 }
+
 export function BudgetPage() {
   const [amount, setAmount] = useState('')
   const [currentBudget, setCurrentBudget] = useState(null)
@@ -827,15 +909,15 @@ export function RecurringPage() {
   const [recurring, setRecurring] = useState([])
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState('')
-  const [showForm, setShowForm] = useState(false)
-
-  const [form, setForm] = useState({
+  const [editingId, setEditingId] = useState(null)
+  const [editForm, setEditForm] = useState({
     name: '',
     amount: '',
     category: 'subscriptions',
     dueDate: '',
     frequency: 'monthly',
   })
+  const [savingEdit, setSavingEdit] = useState(false)
 
   async function loadRecurring() {
     setLoading(true)
@@ -871,31 +953,44 @@ export function RecurringPage() {
     loadRecurring()
   }, [])
 
-  function handleChange(event) {
-    const { name, value } = event.target
+  function startEditing(item) {
+    setError('')
+    setEditingId(item.id)
+    setEditForm({
+      name: item.name || '',
+      amount: String(item.amount ?? ''),
+      category: item.category || 'subscriptions',
+      dueDate: item.due_date || '',
+      frequency: item.frequency || 'monthly',
+    })
+  }
 
-    setForm((previous) => ({
+  function cancelEditing() {
+    setEditingId(null)
+    setEditForm({
+      name: '',
+      amount: '',
+      category: 'subscriptions',
+      dueDate: '',
+      frequency: 'monthly',
+    })
+  }
+
+  function handleEditChange(event) {
+    const { name, value } = event.target
+    setEditForm((previous) => ({
       ...previous,
       [name]: value,
     }))
   }
 
-  async function handleSubmit(event) {
+  async function saveEdit(event, item) {
     event.preventDefault()
     setError('')
 
-    const {
-      data: { user },
-    } = await supabase.auth.getUser()
+    const amount = Number(editForm.amount)
 
-    if (!user) {
-      setError('Please log in first.')
-      return
-    }
-
-    const amount = Number(form.amount)
-
-    if (!form.name.trim()) {
+    if (!editForm.name.trim()) {
       setError('Please enter a recurring expense name.')
       return
     }
@@ -905,40 +1000,41 @@ export function RecurringPage() {
       return
     }
 
-    if (!form.dueDate) {
-      setError('Please select a due date.')
+    if (!editForm.dueDate) {
+      setError('Please select the next due date.')
       return
     }
 
-    const { error } = await supabase
+    setSavingEdit(true)
+
+    const { data, error } = await supabase
       .from('recurring_expenses')
-      .insert({
-        user_id: user.id,
-        name: form.name.trim(),
+      .update({
+        name: editForm.name.trim(),
         amount,
-        category: form.category,
-        due_date: form.dueDate,
-        active: true,
-        frequency: form.frequency,
+        category: editForm.category,
+        frequency: editForm.frequency,
+        due_date: editForm.dueDate,
       })
+      .eq('id', item.id)
+      .select()
+      .single()
 
     if (error) {
-      console.error('Recurring creation error:', error)
+      console.error('Recurring update error:', error)
       setError(error.message)
+      setSavingEdit(false)
       return
     }
 
-    setForm({
-      name: '',
-      amount: '',
-      category: 'subscriptions',
-      dueDate: '',
-      frequency: 'monthly',
-    })
+    setRecurring((previous) =>
+      previous.map((expense) =>
+        expense.id === item.id ? data : expense,
+      ),
+    )
 
-    setShowForm(false)
-
-    await loadRecurring()
+    cancelEditing()
+    setSavingEdit(false)
   }
 
   async function toggleActive(item) {
@@ -988,9 +1084,7 @@ export function RecurringPage() {
     )
   }
 
-  const activeRecurring = recurring.filter(
-    (item) => item.active,
-  )
+  const activeRecurring = recurring.filter((item) => item.active)
 
   const monthlyRecurringTotal = activeRecurring.reduce(
     (total, item) => {
@@ -1011,238 +1105,55 @@ export function RecurringPage() {
 
   return (
     <div className="space-y-6">
-      {/* HEADER */}
       <div className="flex flex-wrap items-end justify-between gap-3">
         <div>
           <h1 className="font-display text-2xl font-semibold text-white">
-            Recurring expenses
+            Recurring Expenses
           </h1>
-
           <p className="mt-1 text-sm text-slate-400">
-            Keep track of subscriptions, bills and other
-            repeating expenses.
+            Manage recurring expenses created from the Expense page.
           </p>
         </div>
-
-        <button
-          onClick={() => setShowForm(!showForm)}
-          className="rounded-xl bg-emerald-400 px-4 py-2 text-sm font-semibold text-slate-950 transition hover:bg-emerald-300"
-        >
-          {showForm ? 'Cancel' : '+ Add Recurring'}
-        </button>
       </div>
 
-      {/* ERROR */}
       {error && (
         <div className="rounded-xl border border-red-400/30 bg-red-400/10 p-4 text-sm text-red-300">
           {error}
         </div>
       )}
 
-      {/* SUMMARY */}
       <div className="grid gap-4 sm:grid-cols-3">
         <Card>
           <CardBody>
-            <p className="text-sm text-slate-400">
-              Active recurring
-            </p>
-
+            <p className="text-sm text-slate-400">Active recurring</p>
             <p className="mt-2 text-2xl font-semibold text-white">
               {activeRecurring.length}
             </p>
-
-            <p className="mt-1 text-xs text-slate-500">
-              Currently active expenses
-            </p>
           </CardBody>
         </Card>
 
         <Card>
           <CardBody>
-            <p className="text-sm text-slate-400">
-              Estimated monthly cost
-            </p>
-
-            <p className="mt-2 text-2xl font-semibold text-white">
+            <p className="text-sm text-slate-400">Estimated monthly</p>
+            <p className="mt-2 text-2xl font-semibold text-emerald-400">
               {formatINR(monthlyRecurringTotal)}
             </p>
-
-            <p className="mt-1 text-xs text-slate-500">
-              Based on active recurring expenses
-            </p>
           </CardBody>
         </Card>
 
         <Card>
           <CardBody>
-            <p className="text-sm text-slate-400">
-              Total items
-            </p>
-
-            <p className="mt-2 text-2xl font-semibold text-white">
-              {recurring.length}
-            </p>
-
-            <p className="mt-1 text-xs text-slate-500">
-              Active + inactive
+            <p className="text-sm text-slate-400">How to add</p>
+            <p className="mt-2 text-sm font-medium text-white">
+              Expense → Make recurring
             </p>
           </CardBody>
         </Card>
       </div>
 
-      {/* ADD FORM */}
-      {showForm && (
-        <Card>
-          <CardHeader>
-            <CardTitle>
-              Add recurring expense
-            </CardTitle>
-          </CardHeader>
-
-          <CardBody>
-            <form
-              onSubmit={handleSubmit}
-              className="grid gap-4 sm:grid-cols-2"
-            >
-              {/* NAME */}
-              <div>
-                <label className="text-sm text-slate-400">
-                  Expense name
-                </label>
-
-                <input
-                  name="name"
-                  value={form.name}
-                  onChange={handleChange}
-                  placeholder="Netflix"
-                  className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white outline-none"
-                  required
-                />
-              </div>
-
-              {/* AMOUNT */}
-              <div>
-                <label className="text-sm text-slate-400">
-                  Amount
-                </label>
-
-                <input
-                  name="amount"
-                  type="number"
-                  min="1"
-                  step="0.01"
-                  value={form.amount}
-                  onChange={handleChange}
-                  placeholder="499"
-                  className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white outline-none"
-                  required
-                />
-              </div>
-
-              {/* CATEGORY */}
-              <div>
-                <label className="text-sm text-slate-400">
-                  Category
-                </label>
-
-                <select
-                  name="category"
-                  value={form.category}
-                  onChange={handleChange}
-                  className="mt-2 w-full rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-white outline-none"
-                >
-                  <option value="food">
-                    Food
-                  </option>
-
-                  <option value="travel">
-                    Travel
-                  </option>
-
-                  <option value="hostel">
-                    Hostel
-                  </option>
-
-                  <option value="subscriptions">
-                    Subscriptions
-                  </option>
-
-                  <option value="stationery">
-                    Stationery / Books
-                  </option>
-
-                  <option value="entertainment">
-                    Entertainment
-                  </option>
-
-                  <option value="misc">
-                    Miscellaneous
-                  </option>
-                </select>
-              </div>
-
-              {/* FREQUENCY */}
-              <div>
-                <label className="text-sm text-slate-400">
-                  Frequency
-                </label>
-
-                <select
-                  name="frequency"
-                  value={form.frequency}
-                  onChange={handleChange}
-                  className="mt-2 w-full rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-white outline-none"
-                >
-                  <option value="weekly">
-                    Weekly
-                  </option>
-
-                  <option value="monthly">
-                    Monthly
-                  </option>
-
-                  <option value="yearly">
-                    Yearly
-                  </option>
-                </select>
-              </div>
-
-              {/* DUE DATE */}
-              <div>
-                <label className="text-sm text-slate-400">
-                  Next due date
-                </label>
-
-                <input
-                  name="dueDate"
-                  type="date"
-                  value={form.dueDate}
-                  onChange={handleChange}
-                  className="mt-2 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white outline-none"
-                  required
-                />
-              </div>
-
-              {/* SUBMIT */}
-              <div className="flex items-end">
-                <button
-                  type="submit"
-                  className="rounded-xl bg-emerald-400 px-5 py-2 font-semibold text-slate-950 transition hover:bg-emerald-300"
-                >
-                  Create Recurring Expense
-                </button>
-              </div>
-            </form>
-          </CardBody>
-        </Card>
-      )}
-
-      {/* RECURRING LIST */}
       <Card>
         <CardHeader>
-          <CardTitle>
-            Your recurring expenses
-          </CardTitle>
+          <CardTitle>Your recurring expenses</CardTitle>
         </CardHeader>
 
         <CardBody className="space-y-4">
@@ -1252,12 +1163,9 @@ export function RecurringPage() {
             </p>
           ) : recurring.length === 0 ? (
             <div className="rounded-xl bg-white/5 p-5">
-              <p className="text-white">
-                No recurring expenses yet.
-              </p>
-
+              <p className="text-white">No recurring expenses yet.</p>
               <p className="mt-1 text-sm text-slate-400">
-                Add your first subscription or recurring bill above.
+                To create one, go to the Expense page and check “Make this a recurring expense”.
               </p>
             </div>
           ) : (
@@ -1266,88 +1174,170 @@ export function RecurringPage() {
                 key={item.id}
                 className="rounded-2xl border border-white/8 bg-white/4 p-5"
               >
-                <div className="flex flex-wrap items-start justify-between gap-4">
-                  <div>
-                    <div className="flex items-center gap-3">
-                      <div
-                        className={`size-2 rounded-full ${
-                          item.active
-                            ? 'bg-emerald-400'
-                            : 'bg-slate-600'
-                        }`}
-                      />
+                {editingId === item.id ? (
+                  <form onSubmit={(event) => saveEdit(event, item)} className="space-y-4">
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div>
+                        <label className="text-xs text-slate-400">Name</label>
+                        <input
+                          name="name"
+                          value={editForm.name}
+                          onChange={handleEditChange}
+                          className="mt-1 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white outline-none"
+                        />
+                      </div>
 
-                      <h3 className="font-medium text-white">
-                        {item.name}
-                      </h3>
+                      <div>
+                        <label className="text-xs text-slate-400">Amount</label>
+                        <input
+                          name="amount"
+                          type="number"
+                          min="1"
+                          step="0.01"
+                          value={editForm.amount}
+                          onChange={handleEditChange}
+                          className="mt-1 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white outline-none"
+                        />
+                      </div>
 
-                      {!item.active && (
-                        <span className="rounded-full bg-slate-700 px-2 py-1 text-xs text-slate-300">
-                          Inactive
-                        </span>
-                      )}
+                      <div>
+                        <label className="text-xs text-slate-400">Category</label>
+                        <select
+                          name="category"
+                          value={editForm.category}
+                          onChange={handleEditChange}
+                          className="mt-1 w-full rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-white outline-none"
+                        >
+                          <option value="food">Food</option>
+                          <option value="travel">Travel</option>
+                          <option value="rent">Rent</option>
+                          <option value="shopping">Shopping</option>
+                          <option value="subscriptions">Subscriptions</option>
+                          <option value="entertainment">Entertainment</option>
+                          <option value="books">Books</option>
+                          <option value="other">Other</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="text-xs text-slate-400">Frequency</label>
+                        <select
+                          name="frequency"
+                          value={editForm.frequency}
+                          onChange={handleEditChange}
+                          className="mt-1 w-full rounded-xl border border-white/10 bg-slate-900 px-3 py-2 text-white outline-none"
+                        >
+                          <option value="weekly">Weekly</option>
+                          <option value="monthly">Monthly</option>
+                          <option value="yearly">Yearly</option>
+                        </select>
+                      </div>
+
+                      <div>
+                        <label className="text-xs text-slate-400">Next due date</label>
+                        <input
+                          name="dueDate"
+                          type="date"
+                          value={editForm.dueDate}
+                          onChange={handleEditChange}
+                          className="mt-1 w-full rounded-xl border border-white/10 bg-white/5 px-3 py-2 text-white outline-none"
+                        />
+                      </div>
                     </div>
 
-                    <p className="mt-2 text-sm text-slate-400">
-                      {item.category} · {item.frequency}
-                    </p>
+                    <div className="flex flex-wrap gap-3">
+                      <button
+                        type="submit"
+                        disabled={savingEdit}
+                        className="rounded-xl bg-emerald-400 px-4 py-2 text-sm font-semibold text-slate-950 hover:bg-emerald-300 disabled:opacity-50"
+                      >
+                        {savingEdit ? 'Saving...' : 'Save changes'}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={cancelEditing}
+                        className="rounded-xl border border-white/10 px-4 py-2 text-sm text-slate-300 hover:bg-white/5"
+                      >
+                        Cancel
+                      </button>
+                    </div>
+                  </form>
+                ) : (
+                  <>
+                    <div className="flex flex-wrap items-start justify-between gap-4">
+                      <div>
+                        <div className="flex items-center gap-3">
+                          <div
+                            className={`size-2 rounded-full ${
+                              item.active ? 'bg-emerald-400' : 'bg-slate-600'
+                            }`}
+                          />
+                          <h3 className="font-medium text-white">{item.name}</h3>
+                          {!item.active && (
+                            <span className="rounded-full bg-slate-700 px-2 py-1 text-xs text-slate-300">
+                              Inactive
+                            </span>
+                          )}
+                        </div>
 
-                    <p className="mt-1 text-xs text-slate-500">
-                      Next due:{' '}
-                      {item.due_date
-                        ? formatDate(
-                            item.due_date,
-                            'd MMM yyyy',
-                          )
-                        : 'Not set'}
-                    </p>
-                  </div>
+                        <p className="mt-2 text-sm text-slate-400">
+                          {CATEGORY_MAP[item.category]?.label || item.category} · {item.frequency}
+                        </p>
 
-                  <div className="text-right">
-                    <p className="text-lg font-semibold text-white">
-                      {formatINR(item.amount)}
-                    </p>
+                        <p className="mt-1 text-xs text-slate-500">
+                          Next due:{' '}
+                          {item.due_date
+                            ? formatDate(item.due_date, 'd MMM yyyy')
+                            : 'Not set'}
+                        </p>
+                      </div>
 
-                    <p className="text-xs text-slate-500">
-                      per {item.frequency}
-                    </p>
-                  </div>
-                </div>
+                      <div className="text-right">
+                        <p className="text-lg font-semibold text-white">
+                          {formatINR(item.amount)}
+                        </p>
+                        <p className="text-xs text-slate-500">per {item.frequency}</p>
+                      </div>
+                    </div>
 
-                <div className="mt-4 flex flex-wrap gap-4 border-t border-white/5 pt-4">
-                  <button
-                    onClick={() => toggleActive(item)}
-                    className="text-sm font-medium text-emerald-300 hover:text-emerald-200"
-                  >
-                    {item.active
-                      ? 'Deactivate'
-                      : 'Activate'}
-                  </button>
+                    <div className="mt-4 flex flex-wrap gap-4 border-t border-white/5 pt-4">
+                      <button
+                        onClick={() => startEditing(item)}
+                        className="flex items-center gap-1 text-sm font-medium text-sky-300 hover:text-sky-200"
+                      >
+                        <Pencil className="size-4" />
+                        Edit
+                      </button>
 
-                  <button
-                    onClick={() =>
-                      deleteRecurring(item.id)
-                    }
-                    className="text-sm text-red-300 hover:text-red-200"
-                  >
-                    Delete
-                  </button>
-                </div>
+                      <button
+                        onClick={() => toggleActive(item)}
+                        className="text-sm font-medium text-emerald-300 hover:text-emerald-200"
+                      >
+                        {item.active ? 'Deactivate' : 'Activate'}
+                      </button>
+
+                      <button
+                        onClick={() => deleteRecurring(item.id)}
+                        className="text-sm text-red-300 hover:text-red-200"
+                      >
+                        Delete
+                      </button>
+                    </div>
+                  </>
+                )}
               </div>
             ))
           )}
         </CardBody>
       </Card>
 
-      {/* INFO */}
       <div className="rounded-2xl border border-white/8 bg-white/4 p-4">
-        <p className="text-sm font-medium text-white">
-          💡 Recurring expenses are reminders
-        </p>
-
-        <p className="mt-1 text-xs text-slate-500">
-          Your app only tracks recurring payments. It will
-          never make payments automatically.
+        <p className="text-sm font-medium text-white">💡 How recurring expenses work</p>
+        <p className="mt-1 text-xs leading-5 text-slate-500">
+          Create the expense from the Expense page. The first expense is saved immediately,
+          so it counts in your budget. Checking “Make this a recurring expense” also creates
+          the recurring rule and shows its next due date here. This page is only for editing,
+          activating/deactivating, and deleting existing recurring rules.
         </p>
       </div>
     </div>
